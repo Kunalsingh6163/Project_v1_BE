@@ -1,3 +1,4 @@
+require("dotenv").config();
 const express = require("express");
 const app = express();
 const cors = require("cors");
@@ -6,7 +7,7 @@ const mongoose = require("mongoose");
 const multer = require("multer")
 const upload = multer({ storage: "./public" })
 const fs = require("fs")
-
+const jwt = require("jsonwebtoken")
 
 const saltRounds = 10;
 
@@ -18,19 +19,34 @@ mongoose
   .then(() => console.log("Connected to MongoDB"))
   .catch((err) => console.error("Error connecting to MongoDB:", err));
 
-const Schema = new mongoose.Schema({
+const UserSchema = new mongoose.Schema({
   name: String,
-  mobile: Number,
+  mobile: String,
   emailid: String,
   password: String,
-  image: {
-    data: Buffer,
-    contentType: String,
-    required:true
-}
+  message: String,
 });
 
-const UserModel = mongoose.model("User", Schema);
+const UserModel = mongoose.model("User", UserSchema);
+const PaymentSchema = new mongoose.Schema({
+  name:String,
+  emailid:String,
+  mobile:String,
+   image: {
+     data: String,
+     contentType: String
+ }
+ });
+ const PaymentModel = mongoose.model("Payment",PaymentSchema);
+ 
+const ContactSchema = new mongoose.Schema({
+  name: String,
+  emailid: String,
+  mobile: String,
+  message: String,
+});
+
+const ContactModel = mongoose.model("Contact", ContactSchema);
 
 // Sign-up post
 app.post("/lmsusers/signup", async (req, res) => {
@@ -38,11 +54,13 @@ app.post("/lmsusers/signup", async (req, res) => {
     console.log(req.body);
     const { name, mobile, emailid, password } = req.body;
 
+    const hashedPassword = await bcrypt.hash(password, saltRounds);
+
     const newUser = new UserModel({
       name,
       mobile,
       emailid,
-      password,
+      password: hashedPassword, 
     });
 
     await newUser.save();
@@ -52,15 +70,14 @@ app.post("/lmsusers/signup", async (req, res) => {
     res.status(500).json({ error: "Internal server error" });
   }
 });
+
 // Signup get method
 app.get("/lmsusers/signup", async (req, res) => {
   try {
-    const { emailid, password } = req.query;
-
-    const users = await UserModel.find({ emailid, password });
+    const users = await UserModel.find();
 
     if (!users || users.length === 0) {
-      return res.status(401).send("User does not exist");
+      return res.status(401).send("No users found");
     } else {
       res.status(200).json({ message: "Users found.", users });
     }
@@ -70,19 +87,34 @@ app.get("/lmsusers/signup", async (req, res) => {
   }
 });
 
-//  //login api with post method
+// function for auth header
+function authenticateToken(req, res, next) {
+  const authHeader = req.headers["authorization"];
+  const token = authHeader && authHeader.split(" ")[1];
+  if (token == null) return res.status(401).json({ message: "Unauthorized" });
+  jwt.verify(token, process.env.ACCESS_TOKEN_SECRET, (err, user) => {
+    if (err) return res.status(403).json({ message: "Forbidden" });
+    req.user = user;
+    next();
+  });
+}
 
-app.post("/lmsusers/login", async (req, res) => {
-  const { emailid, password } = req.body;
-
+// login api with post method
+app.post("/lmsusers/login", authenticateToken, async (req, res) => {
   try {
-    // Check if user exists in the database
-    const user = await UserModel.findOne({ emailid, password });
+    const user = await UserModel.findOne({ emailid: req.body.emailid });
+    if (!user) {
+      return res.status(404).json({ message: "User does not exist" });
+    }
+    
+    const passwordMatch = await bcrypt.compare(req.body.password, user.password);
+    if (passwordMatch) {
+      const accessToken = jwt.sign({ emailid: user.emailid}, process.env.ACCESS_TOKEN_SECRET);
+      console.log("Access Token:", accessToken);
 
-    if (user) {
-      res.status(200).json({ message: "Login successful" });
+      res.status(200).json({ message: "Login successful", accessToken: accessToken });
     } else {
-      res.status(404).json({ message: "User does not exist" });
+      res.status(400).json({ message: "Incorrect password" });
     }
   } catch (error) {
     console.error("Error executing query", error);
@@ -90,34 +122,35 @@ app.post("/lmsusers/login", async (req, res) => {
   }
 });
 
-// Login get
+// get method for login
 app.get("/lmsusers/login", async (req, res) => {
-  const { emailid } = req.query;
-
   try {
-    const users = await UserModel.find({ emailid });
-    if (users.length === 0) {
-      return res.status(404).send("User not found.");
-    }
-    res.send("Login successful.");
-  } catch (err) {
-    console.error(err.message);
-    res.status(500).send("Server error.");
+    const users = await UserModel.find();
+    res.status(200).json(users);
+  } catch (error) {
+    console.error("Error retrieving users:", error);
+    res.status(500).json({ message: "Internal server error" });
   }
 });
 
 // image upload route
-app.post("/lmsusers/courseenrollmentpayment", upload.single('image'), async (req, res, next) => {
+app.post("/lmsusers/paymentConfirmation", upload.single('image'), async (req, res, next) => {
   try {
       // Read the uploaded file
       const imagePath = req.file.path;
       const imageBuffer = fs.readFileSync(imagePath);
 
+      // Convert the image buffer to a Base64 string
+      const base64Image = imageBuffer.toString('base64');
+
       // Create a new document
-      const newDocument = new UserModel({
+      const newDocument = new PaymentModel({
           // Add the uploaded image to the image field
+          name,
+          emailid,
+          mobile,
           image: {
-              data: imageBuffer,
+              data: base64Image,
               contentType: req.file.mimetype
           }
       });
@@ -130,7 +163,28 @@ app.post("/lmsusers/courseenrollmentpayment", upload.single('image'), async (req
       console.error(error);
       res.status(500).send("Error uploading image.");
   }
-}); 
+});
+
+// post method for contact
+app.post("/lmsusers/contact", async (req, res) => {
+  try {
+    const { name, emailid, mobile, message } = req.body;
+    const newContact = new ContactModel({
+      name,
+      emailid,
+      mobile,
+      message
+    });
+
+    await newContact.save();
+
+    res.json(newContact); 
+  } catch (err) {
+    console.error(err.message);
+    res.status(500).send('Server Error');
+  }
+});
+
 app.listen(8000, () => {
   console.log("Server has started on port 8000");
 });
